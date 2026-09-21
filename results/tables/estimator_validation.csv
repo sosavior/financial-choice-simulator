@@ -1,0 +1,5 @@
+exercise,true_effect,mean_estimate,bias,rmse,ci_coverage,rejection_rate_5pct
+"RCT: early vs late aid, difference in means",627.4135269648754,697.0946457715287,69.68111880665333,1926.3957648095395,0.9545,0.0615
+placebo: pre-treatment outcome (true effect = 0),0.0,2.867973035217684,2.867973035217684,490.7080009154371,0.951,0.049
+placebo: both arms receive late aid (true effect = 0),0.0,-16.26727399304814,-16.26727399304814,1977.4912322798198,0.95,0.05
+NON-random assignment (early aid to low-balance households),627.4135269648754,-13857.448497949075,-14484.862024913951,14602.641234159508,0.0,

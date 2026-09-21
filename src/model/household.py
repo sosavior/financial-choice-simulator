@@ -1,75 +1,113 @@
+from dataclasses import dataclass
+from typing import Optional
+from .params import Params, PAY_MIN, REFI, DEFER, PAYDAY
+
+@dataclass
+class PeriodContext:
+    t: int
+    income: float      
+    transfer: float    
+    resources: float   
+    d_hat: float       
+    p_hat: float       
+    pay_formal: float  
+    pay_payday: float  
+    required: float    
+    stress: float      
+    refi_offer: bool = True   
+
 class Household:
-    """
-    Represents a household's financial and cognitive state at time t.
-    """
-    def __init__(self, 
-                 initial_balance: float, 
-                 debt: float, 
-                 obligations: float, 
-                 base_income: float,
-                 attention_sensitivity: float = 0.5):
-        
-        # State Vector S_t
-        self.balance = initial_balance       # B_t
-        self.debt = debt                     # D_t
-        self.obligations = obligations       # O_t
-        self.income = base_income            # Y_t
-        self.attention = 1.0                 # A_t (Starts at 100% capacity)
-        self.information_set = []            # I_t
-        
-        # Model Parameters
-        self.alpha = attention_sensitivity   # Sensitivity of attention to financial stress
-        
-        # Tracking history for the final research data
-        self.history = []
+    def __init__(self, income: float, obligations: float, balance: float,
+                 debt: float, alpha: float, params: Optional[Params] = None):
+        self.p = params or Params()
+        self.income = float(income)
+        self.obligations = float(obligations)
+        self.balance = float(balance)
+        self.debt = float(debt)
+        self.payday_debt = 0.0
+        self.alpha = float(alpha)          
+        self.rate = self.p.r_formal_high
+        self.refinanced = False
+        self.attention = 1.0               
 
-    def calculate_debt_service(self) -> float:
-        """Calculates minimum required debt payment for the period."""
-        # Simplified: assume 5% minimum payment on outstanding debt
-        return self.debt * 0.05 if self.debt > 0 else 0.0
+    @property
+    def net_worth(self) -> float:
+        return self.balance - self.debt - self.payday_debt
 
-    def update_attention(self):
-        """
-        Updates attention capacity A_{t+1} based on financial stress.
-        Formula: A_{t+1} = 1 - alpha * ((O_t + DebtService) / (B_t + Y_{t+1}))
-        """
-        available_resources = self.balance + self.income
-        if available_resources <= 0:
-            self.attention = 0.1 # Floor attention to prevent negative values
-            return
+    def begin_period(self, t: int, income_t: float, transfer: float = 0.0,
+                     refi_offer: bool = True) -> PeriodContext:
+        p = self.p
+        self.balance += transfer
+        d_hat = self.debt * (1.0 + self.rate)
+        p_hat = self.payday_debt * (1.0 + p.r_payday)
+        pay_formal = p.min_pay_rate * d_hat
+        pay_payday = p.r_payday * self.payday_debt
+        required = pay_formal + pay_payday
+        resources = self.balance + income_t - self.obligations
+        stress = min((self.obligations + required) / max(self.balance + income_t, 1.0),
+                     p.stress_cap)
+        target = min(1.0, max(p.a_min, 1.0 - self.alpha * stress))
+        a = (1.0 - p.rho) * self.attention + p.rho * target
+        self.attention = min(1.0, max(p.a_min, a))
+        return PeriodContext(t, income_t, transfer, resources, d_hat, p_hat,
+                             pay_formal, pay_payday, required, stress, bool(refi_offer))
 
-        fixed_costs = self.obligations + self.calculate_debt_service()
-        stress_ratio = fixed_costs / available_resources
-        
-        # Calculate new attention, bound between 0.1 and 1.0
-        new_attention = 1.0 - (self.alpha * stress_ratio)
-        self.attention = max(0.1, min(1.0, new_attention))
+    def payday_split(self, ctx: PeriodContext):
+        p = self.p
+        shortfall = max(0.0, ctx.required - ctx.resources)
+        room = max(0.0, p.payday_cap_months * self.income - self.payday_debt)
+        loan = min(shortfall, room / (1.0 + p.payday_fee))
+        return loan, shortfall - loan
 
-    def step(self, chosen_action_cost: float, income_shock: float = 0.0):
-        """
-        Advances the household state from t to t+1.
-        """
-        # 1. Realize income with potential stochastic shock
-        current_income = self.income + income_shock
-        
-        # 2. Update liquid balance B_{t+1}
-        self.balance = (self.balance 
-                        + current_income 
-                        - self.obligations 
-                        - self.calculate_debt_service() 
-                        - chosen_action_cost)
-        
-        # 3. Update cognitive bandwidth based on new financial state
-        self.update_attention()
-        
-        # 4. Record state for empirical analysis
-        self.record_state()
+    def apply_action(self, name: str, ctx: PeriodContext) -> dict:
+        p = self.p
+        X = ctx.resources
+        interest = self.debt * self.rate + self.payday_debt * p.r_payday
+        fees = 0.0
+        loan = 0.0
+        gap = 0.0
+        d_after = ctx.d_hat
+        p_after = ctx.p_hat
 
-    def record_state(self):
-        """Saves the current state to history for Monte Carlo analysis."""
-        self.history.append({
-            'balance': self.balance,
-            'debt': self.debt,
-            'attention': self.attention,
-            'stress_ratio': (self.obligations + self.calculate_debt_service()) / max(1, self.balance + self.income)
-        })
+        if name == PAY_MIN:
+            new_balance = X - ctx.required
+            d_after -= ctx.pay_formal
+            p_after -= ctx.pay_payday
+        elif name == REFI:
+            fees = p.refi_fee
+            new_balance = X - ctx.required - fees
+            d_after -= ctx.pay_formal
+            p_after -= ctx.pay_payday
+            self.rate = p.r_formal_low          
+            self.refinanced = True
+        elif name == DEFER:
+            fees = p.defer_fee
+            new_balance = X - ctx.pay_payday    
+            d_after += fees                     
+            p_after -= ctx.pay_payday
+        elif name == PAYDAY:
+            if ctx.required - X <= 0:
+                raise ValueError("PAYDAY chosen without a shortfall")
+            loan, gap = self.payday_split(ctx)  
+            fees = p.payday_fee * loan + p.late_fee_rate * gap
+            new_balance = 0.0                   
+            d_after -= ctx.pay_formal
+            d_after += gap * (1.0 + p.late_fee_rate)
+            p_after = p_after - ctx.pay_payday + loan * (1.0 + p.payday_fee)
+        else:
+            raise ValueError(f"unknown action {name!r}")
+
+        new_balance = max(0.0, new_balance)
+        buffer = p.buffer_months * self.obligations
+        excess = new_balance - buffer
+        if excess > 0:
+            q1 = min(p_after, excess)
+            p_after -= q1
+            q2 = min(d_after, excess - q1)
+            d_after -= q2
+            new_balance -= (q1 + q2)
+            
+        self.balance = new_balance
+        self.debt = max(0.0, d_after)
+        self.payday_debt = max(0.0, p_after)
+        return {"interest": interest, "fees": fees, "loan": loan, "gap": gap}

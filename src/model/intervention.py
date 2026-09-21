@@ -1,26 +1,34 @@
-from .household import Household
+from dataclasses import dataclass
+from typing import Optional
 
 class Intervention:
-    """
-    Represents an exogenous policy intervention applied to a household.
-    """
-    def __init__(self, name: str, amount: float, target_period: int):
-        self.name = name
-        self.amount = amount  # The size of the liquidity transfer
-        self.target_period = target_period
-        
-    def apply(self, household: Household, current_period: int) -> bool:
-        """
-        Applies the intervention if the current period matches the target.
-        Returns True if the intervention triggered, False otherwise.
-        """
-        if current_period == self.target_period:
-            # Inject liquidity directly into the household balance
-            household.balance += self.amount
-            
-            # Immediately recalculate cognitive bandwidth, as the financial stress 
-            # has been artificially relieved by the intervention.
-            household.update_attention()
-            return True
-            
-        return False
+    def transfer(self, t: int, household) -> float:
+        return 0.0
+
+class NoIntervention(Intervention):
+    pass
+
+@dataclass
+class LiquidityTransfer(Intervention):
+    amount: float
+    period: int
+    def transfer(self, t: int, household) -> float:
+        return self.amount if t == self.period else 0.0
+
+@dataclass
+class StateTriggeredTransfer(Intervention):
+    amount: float
+    balance_below: float
+    min_period: int = 0
+    delivered: bool = False
+    delivered_at: Optional[int] = None
+
+    def transfer(self, t: int, household) -> float:
+        if (not self.delivered) and t >= self.min_period and household.balance < self.balance_below:
+            self.delivered = True
+            self.delivered_at = t
+            return self.amount
+        return 0.0
+
+def pv_adjusted_amount(amount: float, delay: int, monthly_rate: float) -> float:
+    return amount * (1.0 + monthly_rate) ** delay
