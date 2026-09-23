@@ -38,3 +38,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+    scripts = [
+        "baseline.py",
+        "timing.py",
+        "heterogeneity.py",
+        "sensitivity.py",
+        "targeting.py",
+        "estimator_validation.py",
+        "usresp_monte_carlo.py"  # <-- The new USRESP module appended here
+    ]
