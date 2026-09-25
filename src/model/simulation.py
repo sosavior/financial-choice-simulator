@@ -1,99 +1,99 @@
-from typing import Dict, List, Optional, Sequence
+import os
 import numpy as np
-from .choice_set import ChoiceSet
-from .household import Household
-from .intervention import Intervention, NoIntervention
-from .params import PAY_MIN, REFI, DEFER, PAYDAY
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# ==============================================================================
-# EMPIRICAL CALIBRATION 
-# Source: 2025 Federal Reserve SHED Public Microdata (Variable: EF1)
-# Calibrated via calibrate.py
-# ==============================================================================
-BASE_SHOCK_PROBABILITY = 0.4335 
-EMERGENCY_EXPENSE = 400.00
-# ==============================================================================
+from .params import Params, PAY_MIN, REFI, DEFER, PAYDAY
+from .choice_set import ChoiceSet, Action
+from .empirical_agents import load_empirical_households
 
-class Simulation:
-    def __init__(self, household: Household, choice_set: ChoiceSet, shock_path: np.ndarray,
-                 shock_amount: float = EMERGENCY_EXPENSE, intervention: Optional[Intervention] = None,
-                 onset: Optional[int] = None, snapshot_periods: Sequence[int] = (),
-                 offer_path: Optional[np.ndarray] = None):
-        self.hh = household
-        self.cs = choice_set
-        self.shock_path = np.asarray(shock_path, dtype=bool)
-        self.T = len(self.shock_path)
-        self.shock_amount = shock_amount
-        self.intervention = intervention or NoIntervention()
-        self.onset = onset
-        self.offer_path = (np.ones(self.T, dtype=bool) if offer_path is None
-                           else np.asarray(offer_path, dtype=bool))
-        self.snapshot_periods = set(snapshot_periods)
-        self.history: List[Dict] = []
-        self.initial_net_worth = household.net_worth
-        self.snapshots: Dict[int, float] = {}
-
-    def run(self) -> List[Dict]:
-        hh = self.hh
-        for t in range(self.T):
-            active = bool(self.shock_path[t])
-            # EMPIRICAL UPDATE: Subtract the exact $400 Fed SHED expense rather than an arbitrary 40%
-            income_t = hh.income - self.shock_amount if active else hh.income
+def run_simulation(households, p_shock=0.4335, shock_amount=400.0, friction_multiplier=1.0, periods=12):
+    """
+    Executes the cognitive friction simulation over H periods using empirical agents.
+    Tracks deterministic capture into high-friction debt traps.
+    """
+    params = Params()
+    
+    # Scale administrative sludge (cognitive cost of refinancing/deferring) based on the multiplier
+    custom_actions = [
+        Action(PAY_MIN, params.cog_pay_min),
+        Action(PAYDAY, params.cog_payday),
+        Action(REFI, min(1.0, params.cog_refi * friction_multiplier)),
+        Action(DEFER, min(1.0, params.cog_defer * friction_multiplier))
+    ]
+    choice_set = ChoiceSet(custom_actions, params)
+    
+    capture_count = 0
+    
+    for hh in households:
+        captured = False
+        for t in range(periods):
+            # Stochastic Shock: Fed SHED empirical probability (baseline = 0.4335)
+            # Modeled as a direct hit to liquid resources via negative transfer
+            shock = shock_amount if np.random.rand() < p_shock else 0.0
             
-            transfer = self.intervention.transfer(t, hh)
-            ctx = hh.begin_period(t, income_t, transfer, bool(self.offer_path[t]))
-            dec = self.cs.choose(hh, ctx)
-            flows = hh.apply_action(dec.chosen.name, ctx)
+            # Continuous bandwidth and state update
+            ctx = hh.begin_period(t, income_t=hh.income, transfer=-shock, refi_offer=True)
             
-            self.history.append({
-                "t": t, "shock": active, "income": income_t, "transfer": transfer,
-                "obligations": hh.obligations, "action": dec.chosen.name,
-                "n_feasible": len(dec.feasible), "n_accessible": len(dec.accessible),
-                "cost_gap": dec.cost_gap, "attention": hh.attention, "stress": ctx.stress,
-                "interest": flows["interest"], "fees": flows["fees"], "loan": flows["loan"], "gap": flows["gap"],
-                "balance": hh.balance, "debt": hh.debt, "payday_debt": hh.payday_debt,
-                "net_worth": hh.net_worth,
-            })
-            
-            if t in self.snapshot_periods:
-                self.snapshots[t] = hh.net_worth
+            try:
+                decision = choice_set.choose(hh, ctx)
+                hh.apply_action(decision.chosen.name, ctx)
                 
-        return self.history
-
-    def outcomes(self) -> Dict[str, float]:
-        h = self.history
-        hh = self.hh
-        start = self.onset if self.onset is not None else 0
-        win = [r for r in h if r["t"] >= start]
-        n = max(1, len(win))
-        acts = [r["action"] for r in h]
-        peak_pd = max(r["payday_debt"] for r in h)
-        
-        out = {
-            "nw_final": h[-1]["net_worth"],
-            "balance_final": h[-1]["balance"],
-            "debt_final": h[-1]["debt"],
-            "payday_final": h[-1]["payday_debt"],
-            "total_interest": sum(r["interest"] for r in h),
-            "total_fees": sum(r["fees"] for r in h),
-            "total_transfer": sum(r["transfer"] for r in h),
-            "months_payday_debt": sum(r["payday_debt"] > 1.0 for r in h),
-            "peak_payday_over_income": peak_pd / hh.income,
-            "severe": float(peak_pd > 0.5 * hh.income),
-            "ever_payday_loan": float(PAYDAY in acts),
-            "months_in_arrears": sum(r["gap"] > 1e-9 for r in h),
-            "ever_refinanced": float(hh.refinanced),
-            "n_refi": acts.count(REFI), "n_defer": acts.count(DEFER),
-            "n_payday": acts.count(PAYDAY),
-            "cum_inattention_cost": sum(r["cost_gap"] for r in h),
-            "months_with_foregone_option": sum(r["cost_gap"] > 1e-9 for r in h),
-            "mean_contraction": sum(r["n_feasible"] - r["n_accessible"] for r in win) / n,
-            "mean_accessible": sum(r["n_accessible"] for r in win) / n,
-            "min_attention": min(r["attention"] for r in h),
-            "final_attention": h[-1]["attention"],
-        }
-        
-        for s, v in self.snapshots.items():
-            out[f"nw_at_{s}"] = v
+                # If they default to payday due to cognitive depletion or strict feasibility
+                if decision.chosen.name == PAYDAY:
+                    captured = True
+            except RuntimeError:
+                # Empty accessible set = complete systemic collapse / floor absorption
+                captured = True
+                break
+                
+        if captured:
+            capture_count += 1
             
-        return out
+    # Return percentage of households captured by the debt trap
+    return (capture_count / len(households)) * 100.0
+
+
+def generate_heatmap():
+    """
+    Monte Carlo 2D Sweep: Maps vulnerability across friction multipliers and shock probabilities.
+    """
+    print("Executing Empirical Sensitivity Sweep...")
+    
+    # Define grid boundaries
+    friction_levels = np.linspace(0.5, 2.0, 5) # 0.5x to 2.0x administrative sludge
+    shock_probs = np.linspace(0.2, 0.6, 5)     # 20% to 60% shock likelihood
+    results = np.zeros((len(friction_levels), len(shock_probs)))
+    
+    # Run the grid
+    total_runs = len(friction_levels) * len(shock_probs)
+    current_run = 1
+    
+    for i, f_mult in enumerate(friction_levels):
+        for j, p_shock in enumerate(shock_probs):
+            print(f"Run {current_run}/{total_runs} | Friction: {f_mult:.2f}x | Shock Prob: {p_shock:.2f}")
+            
+            # Re-initialize fresh empirical agents for independent runs
+            hh_run = load_empirical_households(csv_path='public2025.csv', sample_size=5000)
+            
+            capture_rate = run_simulation(hh_run, p_shock=p_shock, friction_multiplier=f_mult)
+            results[i, j] = capture_rate
+            current_run += 1
+            
+    # Render the empirical heatmap
+    plt.figure(figsize=(10, 8))
+    ax = sns.heatmap(results, annot=True, fmt=".1f", cmap="flare", 
+                     xticklabels=np.round(shock_probs, 2), 
+                     yticklabels=np.round(friction_levels, 2))
+    plt.title("Empirical Sensitivity Grid: Vulnerability to Administrative Sludge")
+    plt.xlabel("Fed SHED Shock Probability (Baseline = 0.43)")
+    plt.ylabel("Cognitive Friction Multiplier")
+    
+    # Save the asset
+    os.makedirs("results", exist_ok=True)
+    save_path = "results/sensitivity_heatmap_calibrated.png"
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\nSuccess. Graph saved to {save_path}")
+
+if __name__ == "__main__":
+    generate_heatmap()
