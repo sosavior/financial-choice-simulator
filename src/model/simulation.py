@@ -5,16 +5,25 @@ from .household import Household
 from .intervention import Intervention, NoIntervention
 from .params import PAY_MIN, REFI, DEFER, PAYDAY
 
+# ==============================================================================
+# EMPIRICAL CALIBRATION 
+# Source: 2025 Federal Reserve SHED Public Microdata (Variable: EF1)
+# Calibrated via calibrate.py
+# ==============================================================================
+BASE_SHOCK_PROBABILITY = 0.4335 
+EMERGENCY_EXPENSE = 400.00
+# ==============================================================================
+
 class Simulation:
     def __init__(self, household: Household, choice_set: ChoiceSet, shock_path: np.ndarray,
-                 shock_size: float = 0.4, intervention: Optional[Intervention] = None,
+                 shock_amount: float = EMERGENCY_EXPENSE, intervention: Optional[Intervention] = None,
                  onset: Optional[int] = None, snapshot_periods: Sequence[int] = (),
                  offer_path: Optional[np.ndarray] = None):
         self.hh = household
         self.cs = choice_set
         self.shock_path = np.asarray(shock_path, dtype=bool)
         self.T = len(self.shock_path)
-        self.shock_size = shock_size
+        self.shock_amount = shock_amount
         self.intervention = intervention or NoIntervention()
         self.onset = onset
         self.offer_path = (np.ones(self.T, dtype=bool) if offer_path is None
@@ -28,11 +37,14 @@ class Simulation:
         hh = self.hh
         for t in range(self.T):
             active = bool(self.shock_path[t])
-            income_t = hh.income * (1.0 - self.shock_size) if active else hh.income
+            # EMPIRICAL UPDATE: Subtract the exact $400 Fed SHED expense rather than an arbitrary 40%
+            income_t = hh.income - self.shock_amount if active else hh.income
+            
             transfer = self.intervention.transfer(t, hh)
             ctx = hh.begin_period(t, income_t, transfer, bool(self.offer_path[t]))
             dec = self.cs.choose(hh, ctx)
             flows = hh.apply_action(dec.chosen.name, ctx)
+            
             self.history.append({
                 "t": t, "shock": active, "income": income_t, "transfer": transfer,
                 "obligations": hh.obligations, "action": dec.chosen.name,
@@ -42,8 +54,10 @@ class Simulation:
                 "balance": hh.balance, "debt": hh.debt, "payday_debt": hh.payday_debt,
                 "net_worth": hh.net_worth,
             })
+            
             if t in self.snapshot_periods:
                 self.snapshots[t] = hh.net_worth
+                
         return self.history
 
     def outcomes(self) -> Dict[str, float]:
@@ -54,6 +68,7 @@ class Simulation:
         n = max(1, len(win))
         acts = [r["action"] for r in h]
         peak_pd = max(r["payday_debt"] for r in h)
+        
         out = {
             "nw_final": h[-1]["net_worth"],
             "balance_final": h[-1]["balance"],
@@ -77,6 +92,8 @@ class Simulation:
             "min_attention": min(r["attention"] for r in h),
             "final_attention": h[-1]["attention"],
         }
+        
         for s, v in self.snapshots.items():
             out[f"nw_at_{s}"] = v
+            
         return out
