@@ -37,54 +37,58 @@ def simulate_cohort(cohort, choice_set, policy, periods=12):
     return captures
 
 def run_rct():
-    print("Initializing Synthetic RCT with SMM Parameters...\n")
+    print("Initializing Comparative Synthetic RCT...\n")
     
-    # 1. Lock in the estimated SMM parameters from the optimization run
     smm_alpha = 0.525
     smm_cog_payday = 0.100
-    params = Params(cog_payday=smm_cog_payday)
     
-    actions = [
-        Action(PAY_MIN, params.cog_pay_min),
-        Action(PAYDAY, params.cog_payday),
-        Action(REFI, params.cog_refi),
-        Action(DEFER, params.cog_defer)
-    ]
-    choice_set = ChoiceSet(actions, params)
+    # Standard Environment (For Control & Liquidity Treatment)
+    params_std = Params(cog_payday=smm_cog_payday)
+    choice_set_std = ChoiceSet([
+        Action(PAY_MIN, params_std.cog_pay_min),
+        Action(PAYDAY, params_std.cog_payday),
+        Action(REFI, params_std.cog_refi), # Standard high friction (0.70)
+        Action(DEFER, params_std.cog_defer)
+    ], params_std)
+
+    # Frictionless Environment (For Sludge Eradication Treatment)
+    params_frictionless = Params(cog_payday=smm_cog_payday, cog_refi=0.100) # Friction neutralized
+    choice_set_frictionless = ChoiceSet([
+        Action(PAY_MIN, params_frictionless.cog_pay_min),
+        Action(PAYDAY, params_frictionless.cog_payday),
+        Action(REFI, params_frictionless.cog_refi), # Friction neutralized
+        Action(DEFER, params_frictionless.cog_defer)
+    ], params_frictionless)
     
-    # 2. Load the empirical Fed SHED population (2,000 agents for the RCT)
-    population = load_empirical_households(csv_path='public2025.csv', sample_size=2000, seed=42)
+    # Load population (3,000 agents)
+    population = load_empirical_households(csv_path='public2025.csv', sample_size=3000, seed=42)
     for hh in population:
-        hh.alpha = smm_alpha  # Inject the estimated stress elasticity
+        hh.alpha = smm_alpha 
         
-    # Split into perfectly randomized Control and Treatment groups
     control_group = copy.deepcopy(population[:1000])
-    treatment_group = copy.deepcopy(population[1000:])
+    treatment_cash = copy.deepcopy(population[1000:2000])
+    treatment_sludge = copy.deepcopy(population[2000:])
     
-    # 3. Define the Interventions
-    control_policy = NoIntervention()
-    treatment_policy = LiquidityTransfer(amount=500.0, period=2)  # $500 transferred at Month 3
+    print("Running Control Group (Baseline)...")
+    control_captures = simulate_cohort(control_group, choice_set_std, NoIntervention())
     
-    print("Running Control Group (No Intervention)...")
-    control_captures = simulate_cohort(control_group, choice_set, control_policy)
+    print("Running Treatment A ($500 Cash Transfer)...")
+    cash_captures = simulate_cohort(treatment_cash, choice_set_std, LiquidityTransfer(amount=500.0, period=2))
+
+    print("Running Treatment B (Sludge Eradication, No Cash)...")
+    sludge_captures = simulate_cohort(treatment_sludge, choice_set_frictionless, NoIntervention())
     
-    print("Running Treatment Group ($500 Cash Transfer at Month 3)...")
-    treatment_captures = simulate_cohort(treatment_group, choice_set, treatment_policy)
+    c_rate = (control_captures / len(control_group)) * 100
+    t_cash_rate = (cash_captures / len(treatment_cash)) * 100
+    t_sludge_rate = (sludge_captures / len(treatment_sludge)) * 100
     
-    # 4. Calculate Average Treatment Effect (ATE)
-    control_rate = (control_captures / len(control_group)) * 100
-    treatment_rate = (treatment_captures / len(treatment_group)) * 100
-    ate = control_rate - treatment_rate
-    
-    print("\n" + "="*65)
-    print("SYNTHETIC RCT RESULTS: LIQUIDITY VS. COGNITIVE SLUDGE")
-    print("="*65)
-    print(f"Control Group Capture Rate:       {control_rate:.1f}%")
-    print(f"Treatment Group Capture Rate:     {treatment_rate:.1f}%")
-    print("-" * 65)
-    print(f"Absolute Treatment Effect (ATE): -{ate:.1f}%")
-    print(f"Relative Risk Reduction:          {(ate/control_rate)*100:.1f}%")
-    print("="*65)
+    print("\n" + "="*70)
+    print("COMPARATIVE RCT: LIQUIDITY INJECTION VS. SLUDGE ERADICATION")
+    print("="*70)
+    print(f"Control Capture Rate:               {c_rate:.1f}%")
+    print(f"Treatment A (Cash) Capture Rate:    {t_cash_rate:.1f}% (ATE: {t_cash_rate - c_rate:.1f}%)")
+    print(f"Treatment B (Sludge) Capture Rate:  {t_sludge_rate:.1f}% (ATE: {t_sludge_rate - c_rate:.1f}%)")
+    print("="*70)
 
 if __name__ == "__main__":
     run_rct()
