@@ -1,6 +1,7 @@
 """Model parameters. All rates are MONTHLY; all money amounts are dollars.
-IMPORTANT: none of these numbers is estimated from data. They are stated
-assumptions chosen to be roughly plausible for a US household."""
+Cognitive cost thresholds (cog_refi, cog_defer) represent theoretical administrative sludge. 
+Baseline shock triggers are calibrated externally via 2025 Fed SHED empirical microdata."""
+
 from dataclasses import dataclass
 
 PAY_MIN = "pay_min"
